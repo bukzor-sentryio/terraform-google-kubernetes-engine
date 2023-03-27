@@ -61,6 +61,7 @@ locals {
   {% endif %}
 
   release_channel = var.release_channel != null ? [{ channel : var.release_channel }] : []
+  gateway_api_config = var.gateway_api_channel != null ? [{ channel : var.gateway_api_channel }] : []
 
   {% if autopilot_cluster != true %}
   autoscaling_resource_limits = var.cluster_autoscaling.enabled ? concat([{
@@ -71,7 +72,7 @@ locals {
     resource_type = "memory"
     minimum       = var.cluster_autoscaling.min_memory_gb
     maximum       = var.cluster_autoscaling.max_memory_gb
-  }], var.cluster_autoscaling.gpu_resources) : []
+  }], var.cluster_autoscaling.gpu_resources) : []  
   {% endif %}
 
 
@@ -88,7 +89,32 @@ locals {
 {% endif %}
 
   cluster_subnet_cidr       = var.add_cluster_firewall_rules ? data.google_compute_subnetwork.gke_subnetwork[0].ip_cidr_range : null
-  cluster_alias_ranges_cidr = var.add_cluster_firewall_rules && data.google_compute_subnetwork.gke_subnetwork[0].secondary_ip_range != null ? { for range in toset(data.google_compute_subnetwork.gke_subnetwork[0].secondary_ip_range) : range.range_name => range.ip_cidr_range } : {}
+  cluster_alias_ranges_cidr = (
+      var.add_cluster_firewall_rules && data.google_compute_subnetwork.gke_subnetwork[0].secondary_ip_range != null
+      ? { for range in toset(data.google_compute_subnetwork.gke_subnetwork[0].secondary_ip_range) : range.range_name => range.ip_cidr_range } 
+      : {}
+  )
+{% if autopilot_cluster != true %}
+  pod_all_ip_ranges         = (
+      var.add_cluster_firewall_rules
+      ? compact(concat(
+        [lookup(local.cluster_alias_ranges_cidr, var.ip_range_pods, null)],
+        [ for k, v in merge(local.node_pools, local.windows_node_pools):
+            lookup(local.cluster_alias_ranges_cidr, v.pod_range, null)
+            if length(lookup(v, "pod_range", "")) > 0
+        ],
+      ))
+      : []
+  )
+{% else %}
+  pod_all_ip_ranges         = (
+      var.add_cluster_firewall_rules
+      ? compact([
+        lookup(local.cluster_alias_ranges_cidr, var.ip_range_pods, null)
+      ])
+      : []
+  )
+{% endif %}
 
 {% if autopilot_cluster != true %}
   cluster_network_policy = var.network_policy ? [{
@@ -98,6 +124,9 @@ locals {
     enabled  = false
     provider = null
   }]
+  cluster_gce_pd_csi_config = var.gce_pd_csi_driver ? [{ enabled = true }] : [{ enabled = false }]
+  logmon_config_is_set      = length(var.logging_enabled_components) > 0 || length(var.monitoring_enabled_components) > 0 || var.monitoring_enable_managed_prometheus
+  gke_backup_agent_config   = var.gke_backup_agent_config ? [{ enabled = true }] : [{ enabled = false }]
 {% endif %}
 {% if beta_cluster and autopilot_cluster != true %}
   cluster_cloudrun_config_load_balancer_config = (var.cloudrun && var.cloudrun_load_balancer_type != "") ? {
@@ -112,9 +141,6 @@ locals {
     )
   ] : []
   cluster_cloudrun_enabled  = var.cloudrun
-  cluster_gce_pd_csi_config = var.gce_pd_csi_driver ? [{ enabled = true }] : [{ enabled = false }]
-  gke_backup_agent_config   = var.gke_backup_agent_config ? [{ enabled = true }] : [{ enabled = false }]
-  logmon_config_is_set      = length(var.logging_enabled_components) > 0 || length(var.monitoring_enabled_components) > 0 || var.monitoring_enable_managed_prometheus
 {% endif %}
 
   cluster_authenticator_security_group = var.authenticator_security_group == null ? [] : [{

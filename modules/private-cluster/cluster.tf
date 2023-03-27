@@ -47,6 +47,15 @@ resource "google_container_cluster" "primary" {
       channel = release_channel.value.channel
     }
   }
+
+  dynamic "gateway_api_config" {
+    for_each = local.gateway_api_config
+
+    content {
+      channel = gateway_api_config.value.channel
+    }
+  }
+
   dynamic "cost_management_config" {
     for_each = var.enable_cost_allocation ? [1] : []
     content {
@@ -62,8 +71,31 @@ resource "google_container_cluster" "primary" {
 
   min_master_version = var.release_channel == null || var.release_channel == "UNSPECIFIED" ? local.master_version : null
 
-  logging_service    = var.logging_service
-  monitoring_service = var.monitoring_service
+  # only one of logging/monitoring_service or logging/monitoring_config can be specified
+  logging_service = local.logmon_config_is_set ? null : var.logging_service
+  dynamic "logging_config" {
+    for_each = length(var.logging_enabled_components) > 0 ? [1] : []
+
+    content {
+      enable_components = var.logging_enabled_components
+    }
+  }
+  monitoring_service = local.logmon_config_is_set ? null : var.monitoring_service
+  dynamic "monitoring_config" {
+    for_each = length(var.monitoring_enabled_components) > 0 || var.monitoring_enable_managed_prometheus ? [1] : []
+
+    content {
+      enable_components = length(var.monitoring_enabled_components) > 0 ? var.monitoring_enabled_components : []
+
+      dynamic "managed_prometheus" {
+        for_each = var.monitoring_enable_managed_prometheus ? [1] : []
+
+        content {
+          enabled = var.monitoring_enable_managed_prometheus
+        }
+      }
+    }
+  }
   cluster_autoscaling {
     enabled = var.cluster_autoscaling.enabled
     dynamic "auto_provisioning_defaults" {
@@ -72,6 +104,12 @@ resource "google_container_cluster" "primary" {
       content {
         service_account = local.service_account
         oauth_scopes    = local.node_pools_oauth_scopes["all"]
+
+        management {
+          auto_repair  = lookup(var.cluster_autoscaling, "auto_repair", true)
+          auto_upgrade = lookup(var.cluster_autoscaling, "auto_upgrade", true)
+        }
+
       }
     }
     dynamic "resource_limits" {
@@ -95,6 +133,8 @@ resource "google_container_cluster" "primary" {
       evaluation_mode = "PROJECT_SINGLETON_POLICY_ENFORCE"
     }
   }
+
+  enable_kubernetes_alpha = var.enable_kubernetes_alpha
 
   dynamic "master_authorized_networks_config" {
     for_each = local.master_authorized_networks_config
@@ -131,7 +171,6 @@ resource "google_container_cluster" "primary" {
       disabled = !var.horizontal_pod_autoscaling
     }
 
-
     network_policy_config {
       disabled = !var.network_policy
     }
@@ -142,6 +181,22 @@ resource "google_container_cluster" "primary" {
 
     gcp_filestore_csi_driver_config {
       enabled = var.filestore_csi_driver
+    }
+
+    dynamic "gce_persistent_disk_csi_driver_config" {
+      for_each = local.cluster_gce_pd_csi_config
+
+      content {
+        enabled = gce_persistent_disk_csi_driver_config.value.enabled
+      }
+    }
+
+    dynamic "gke_backup_agent_config" {
+      for_each = local.gke_backup_agent_config
+
+      content {
+        enabled = gke_backup_agent_config.value.enabled
+      }
     }
   }
 
@@ -396,6 +451,10 @@ resource "google_container_node_pool" "pools" {
       local.node_pools_labels["all"],
       local.node_pools_labels[each.value["name"]],
     )
+    resource_labels = merge(
+      local.node_pools_resource_labels["all"],
+      local.node_pools_resource_labels[each.value["name"]],
+    )
     metadata = merge(
       lookup(lookup(local.node_pools_metadata, "default_values", {}), "cluster_name", true) ? { "cluster_name" = var.name } : {},
       lookup(lookup(local.node_pools_metadata, "default_values", {}), "node_pool", true) ? { "node_pool" = each.value["name"] } : {},
@@ -458,6 +517,20 @@ resource "google_container_node_pool" "pools" {
       }
     }
 
+
+    dynamic "linux_node_config" {
+      for_each = length(merge(
+        local.node_pools_linux_node_configs_sysctls["all"],
+        local.node_pools_linux_node_configs_sysctls[each.value["name"]]
+      )) != 0 ? [1] : []
+
+      content {
+        sysctls = merge(
+          local.node_pools_linux_node_configs_sysctls["all"],
+          local.node_pools_linux_node_configs_sysctls[each.value["name"]]
+        )
+      }
+    }
 
     boot_disk_kms_key = lookup(each.value, "boot_disk_kms_key", "")
 
@@ -550,6 +623,10 @@ resource "google_container_node_pool" "windows_pools" {
       local.node_pools_labels["all"],
       local.node_pools_labels[each.value["name"]],
     )
+    resource_labels = merge(
+      local.node_pools_resource_labels["all"],
+      local.node_pools_resource_labels[each.value["name"]],
+    )
     metadata = merge(
       lookup(lookup(local.node_pools_metadata, "default_values", {}), "cluster_name", true) ? { "cluster_name" = var.name } : {},
       lookup(lookup(local.node_pools_metadata, "default_values", {}), "node_pool", true) ? { "node_pool" = each.value["name"] } : {},
@@ -611,6 +688,7 @@ resource "google_container_node_pool" "windows_pools" {
         mode = lookup(each.value, "node_metadata", workload_metadata_config.value.mode)
       }
     }
+
 
 
     boot_disk_kms_key = lookup(each.value, "boot_disk_kms_key", "")
